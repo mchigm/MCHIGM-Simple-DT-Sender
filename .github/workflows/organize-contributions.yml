@@ -1,0 +1,204 @@
+name: Organize Community Contributions
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+jobs:
+  organize-contribution:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Parse PR Title
+        id: parse_title
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          echo "PR Title: $PR_TITLE"
+          
+          # Extract "Your Name" and "Project Name" from title format: "(Your Name) | (Project Name)"
+          if [[ $PR_TITLE =~ ^\(([^)]+)\)[[:space:]]*\|[[:space:]]*\(([^)]+)\)$ ]]; then
+            CONTRIBUTOR_NAME="${BASH_REMATCH[1]}"
+            PROJECT_NAME="${BASH_REMATCH[2]}"
+            echo "contributor_name=$CONTRIBUTOR_NAME" >> $GITHUB_OUTPUT
+            echo "project_name=$PROJECT_NAME" >> $GITHUB_OUTPUT
+            echo "valid_format=true" >> $GITHUB_OUTPUT
+            echo "✅ Valid PR title format"
+            echo "Contributor: $CONTRIBUTOR_NAME"
+            echo "Project: $PROJECT_NAME"
+          else
+            echo "valid_format=false" >> $GITHUB_OUTPUT
+            echo "❌ Invalid PR title format"
+            echo "Expected format: (Your Name) | (Project Name)"
+            echo "Example: (John Doe) | (My Amazing Project)"
+          fi
+      
+      - name: Comment on invalid format
+        if: steps.parse_title.outputs.valid_format == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '❌ **Invalid PR Title Format**\n\nYour PR title must follow this format:\n```\n(Your Name) | (Project Name)\n```\n\n**Example:**\n```\n(John Doe) | (My Amazing DT Sender)\n```\n\nPlease update your PR title and the workflow will run again.'
+            })
+      
+      - name: Fail if invalid format
+        if: steps.parse_title.outputs.valid_format == 'false'
+        run: |
+          echo "PR title does not match required format: (Your Name) | (Project Name)"
+          exit 1
+      
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Organize files into contributor folder
+        id: organize
+        run: |
+          CONTRIBUTOR_NAME="${{ steps.parse_title.outputs.contributor_name }}"
+          PROJECT_NAME="${{ steps.parse_title.outputs.project_name }}"
+          
+          # Sanitize folder name (replace spaces with underscores, remove special chars)
+          FOLDER_NAME=$(echo "$CONTRIBUTOR_NAME" | sed 's/ /_/g' | sed 's/[^a-zA-Z0-9_-]//g')
+          echo "folder_name=$FOLDER_NAME" >> $GITHUB_OUTPUT
+          
+          # Check if folder exists
+          if [ -d "$FOLDER_NAME" ]; then
+            echo "✅ Folder '$FOLDER_NAME' already exists"
+            echo "folder_created=false" >> $GITHUB_OUTPUT
+          else
+            echo "📁 Creating folder '$FOLDER_NAME'"
+            mkdir -p "$FOLDER_NAME"
+            echo "folder_created=true" >> $GITHUB_OUTPUT
+          fi
+          
+          # Get all files added or modified in this PR (excluding workflow files and README in root)
+          git fetch origin main
+          FILES=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep -v "^\.github/" | grep -v "^README\.md$" || true)
+          
+          if [ -z "$FILES" ]; then
+            echo "ℹ️ No files to organize (only .github or README changes)"
+            echo "files_moved=false" >> $GITHUB_OUTPUT
+          else
+            echo "files_moved=true" >> $GITHUB_OUTPUT
+            echo "📦 Files to organize:"
+            echo "$FILES"
+            
+            # Move files to contributor folder
+            for FILE in $FILES; do
+              if [ -f "$FILE" ]; then
+                BASENAME=$(basename "$FILE")
+                DIRNAME=$(dirname "$FILE")
+                
+                # If file is not already in the contributor folder
+                if [[ ! "$FILE" =~ ^$FOLDER_NAME/ ]]; then
+                  # Preserve directory structure within contributor folder
+                  if [ "$DIRNAME" != "." ]; then
+                    mkdir -p "$FOLDER_NAME/$DIRNAME"
+                    TARGET="$FOLDER_NAME/$FILE"
+                  else
+                    TARGET="$FOLDER_NAME/$BASENAME"
+                  fi
+                  
+                  echo "Moving: $FILE -> $TARGET"
+                  mv "$FILE" "$TARGET"
+                fi
+              fi
+            done
+          fi
+      
+      - name: Create contributor README
+        if: steps.organize.outputs.folder_created == 'true'
+        run: |
+          CONTRIBUTOR_NAME="${{ steps.parse_title.outputs.contributor_name }}"
+          PROJECT_NAME="${{ steps.parse_title.outputs.project_name }}"
+          FOLDER_NAME="${{ steps.organize.outputs.folder_name }}"
+          
+          cat > "$FOLDER_NAME/README.md" << EOF
+          # $PROJECT_NAME
+          
+          **Contributor:** $CONTRIBUTOR_NAME
+          
+          ## Description
+          
+          This is a community contribution to the MCHIGM-Simple-DT-Sender project.
+          
+          ## About
+          
+          Add your project description here.
+          
+          ## Usage
+          
+          Add usage instructions here.
+          
+          ---
+          
+          *This contribution is part of the MCHIGM-Simple-DT-Sender community project.*
+          EOF
+          
+          echo "✅ Created README for $CONTRIBUTOR_NAME"
+      
+      - name: Commit changes
+        id: commit
+        run: |
+          git add .
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            echo "changes_committed=false" >> $GITHUB_OUTPUT
+          else
+            CONTRIBUTOR_NAME="${{ steps.parse_title.outputs.contributor_name }}"
+            git commit -m "Organize contribution from $CONTRIBUTOR_NAME"
+            echo "changes_committed=true" >> $GITHUB_OUTPUT
+            echo "✅ Changes committed"
+          fi
+      
+      - name: Push changes
+        if: steps.commit.outputs.changes_committed == 'true'
+        run: |
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+          echo "✅ Changes pushed to PR branch"
+      
+      - name: Comment on success
+        if: steps.commit.outputs.changes_committed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const contributorName = '${{ steps.parse_title.outputs.contributor_name }}';
+            const folderName = '${{ steps.organize.outputs.folder_name }}';
+            const folderCreated = '${{ steps.organize.outputs.folder_created }}' === 'true';
+            
+            let message = `✅ **Contribution Organized Successfully**\n\n`;
+            message += `**Contributor:** ${contributorName}\n`;
+            message += `**Folder:** \`${folderName}/\`\n\n`;
+            
+            if (folderCreated) {
+              message += `📁 Created new contributor folder: \`${folderName}/\`\n`;
+            } else {
+              message += `📁 Added to existing contributor folder: \`${folderName}/\`\n`;
+            }
+            
+            message += `\n✨ Your files have been automatically organized. Please review the changes and update your project README if needed.`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            })
