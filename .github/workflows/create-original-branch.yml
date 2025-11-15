@@ -1,0 +1,38 @@
+name: Create Original Branch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-branch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Create and push Original branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if Original branch already exists
+          if git ls-remote --heads origin Original | grep -q Original; then
+            echo "Branch 'Original' already exists on remote"
+            exit 0
+          fi
+          
+          # Create the Original branch from the base commit
+          git checkout -b Original 086cbfe065994cc757311d5555ecbed2ee934101
+          
+          # Push the branch to remote
+          git push -u origin Original
+          
+          echo "Successfully created and pushed 'Original' branch"
